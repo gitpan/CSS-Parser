@@ -1,0 +1,83 @@
+
+-----------------------------------------------------------------------
+ CSS::Parser - parser for CSS-style syntax
+ v0.61 - 21/10/1999
+-----------------------------------------------------------------------
+
+
+The CSS::Parser deals simply with fairly loose CSS syntax.
+It doesn't know anything about what it is parsing, for that
+see other classes. This allows it to be the base for CSS::CSSn,
+CSS::STTSn and any other parser for a css-compatible syntax.
+
+
+Chances are, you will want to use one of the existing subclasses or
+to subclass it yourself.
+
+
+PREREQUISITES
+=============
+
+You need perl 5.005 or better.
+
+
+INSTALL
+=======
+
+Simple as usual:
+
+	perl Makefile.PL
+	make
+	make install
+
+
+TODO
+====
+
+	- add tests
+	- improve performance (not bad but could probably be improved)
+	- make compatible with version of Perl prior to 5.005 (?)
+
+I am very open to suggestions, please email me any comment you have or
+any problem you face using this module.
+
+
+CHANGES
+=======
+
+
+v0.61
+
+	Stupid make tardist error, I somehow managed to scrap the README
+
+
+v0.60 21/10/1999
+
+	Complete rewrite, now parses at-rules. The principle has changed as
+	it now parses a very loose CSS syntax and delegates making sense of
+	it to subclasses. The interface may still evolve but will remain
+	backwards compatible. This module is now considered beta.
+
+
+Several rewrites that weren't made public.
+
+v0.06 12/08/1999
+
+	Fixes the previous small bugs
+
+
+v0.05 07/08/1999
+
+	First public release, had a few bugs and didn't parse at-rules
+
+
+
+COPYRIGHT
+=========
+
+Copyright (c) 1998-1999 Robin Berjon <robin@knowscape.com>. All rights
+reserved.
+
+This library is free software; you can redistribute it and/or
+modify it under the same terms as Perl itself.
+

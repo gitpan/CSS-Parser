@@ -3,7 +3,7 @@ package CSS::Parser;
 use strict;
 require 5.005;
 use vars qw($VERSION);
-$VERSION = '0.60';
+$VERSION = '0.61';
 
 # This parser deals simply with fairly loose CSS syntax.
 # It doesn't know anything about what it is parsing, for that
