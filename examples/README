@@ -1,0 +1,6 @@
+This is a very simple example of what can be done with CSS::Parser.
+
+Simply run printer.pl and the output you'll see is the info that CSS::Parser has gathered
+in the provided test.css.
+
+CSSPrinter.pm is the example subclass used to achieve this.

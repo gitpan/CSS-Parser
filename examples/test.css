@@ -1,0 +1,36 @@
+@otherslR "hello word";
+
+
+ H1 { font-family : "Verdana, Arial, Sans-Serif";
+      font-weight : bold;
+      font-size : 20px;
+}
+@import;
+
+
+
+ P.indent { font-family : "Gill Sans Light,Verdana, Arial, Sans-Serif";
+            list-style-type : circle;
+            list-style-position : inside;
+            color : black;
+            margin-left : 16px;}
+
+
+H1 H2 A:link { font-family : "Gill Sans Light,Verdana, Arial, Sans-Serif";
+            list-style-type : circle;
+            list-style-position : inside;
+            color : black;
+            margin-left : 16px;}
+
+
+@rulekri { font-family : "Tahoma,Verdana, Arial, Sans-Serif";
+      font-size : 18px;
+      color : blue;}
+
+ PRE {
+font-size : 12px;
+from-pre : 16;
+nested-gentle {hello}
+hello-after : 18px;
+}
+
