@@ -1,736 +1,711 @@
 package CSS::Parser;
 
 use strict;
-require Exporter;
+require 5.005;
 use vars qw($VERSION);
-$VERSION = "0.05";
+$VERSION = '0.60';
 
-#use diagnostics;
+# This parser deals simply with fairly loose CSS syntax.
+# It doesn't know anything about what it is parsing, for that
+# see other classes. This allows it to be the base for CSS::CSSn,
+# CSS::STTSn and any other parser for a css-compatible syntax.
+
+# The syntax it understands might not be very detailed, but it
+# allows for a lot of future extensions. The existing derived
+# classes are much stricter in what they accept.
+
+
+
+# NOTES FOR ROBIN
+#
+# - this might be going to CPAN earlier than I thought...
+# - start by building CSS1, then CSS2, then STTS3
+# - if this moves to CPAN, then make it to CSS::Parser and so forth
+#	and make this but a subclass
+# - in Tessera, we will want to define extra rules, such as @tessera for instance
+# - is there a way that a default sub (or any sub called by more than one callback)
+#	may know how it was called (under what name ?)
+
+
+
+# TO DO
+# - document
+# - commit to CPAN (after testing install on Linux)
+
 
 
 sub new {
-    my $class = shift;
-    my $self = bless {
-						'_case_sensitive' 	=> '0',
-						'_buf'				=> ''
-					}, $class;
-    $self;
-}
+	my $class = shift;
 
-sub css_parse {
-	my $self = shift;
+	die "Uneven number of arguments for ${class}::new()" if scalar @_ % 2;
+	# we could also check that given args are correct
+	my %options = (
+					style		=> 'callback',		# the parsing style (callback is the only one for the moment)
+					handlers	=> {},
+					@_
+					);
 
-	my $buf = \$self->{_buf};
 
-	unless (defined $_[0]) {
-		# on EOF, if there is something left then it is likely
-		# that it should be a single line @rule
-		# but just in case stylesheets become as poorly written
-		# as some html pages are, we will test against that and flag
-		# any remaining text as a comment if it isn't an @rule
-		if (length $$buf) {
+	my @subs = qw(
+					html_open_comment
+					html_close_comment
+					css_comment
+					comment
+					at_symbol
+					at_rule
+					selector_string
+					block_start
+					property
+					value
+					declaration
+					block_end
+					ruleset
+					error
+					default
+				);
 
-			my $at_rule;
-			FINAL:{
-				while (1) {
-					#if it's only whitespace, then get rid of it
-					if ($$buf =~ s/^\s$//s) {
-						last FINAL;
-					}
-					#else if we've got the beginning of an at_rule
-					elsif ($$buf =~ s/^\s*(\@.+?;)//s) {
-						$at_rule = $1;
-						while (1) {
-							#the last ";" must not be within quotes, () or []
-							#if it is then when need more
-							if ($self->_quote($at_rule) || $self->_square($at_rule) || $self->_paren($at_rule)) {
-								if ($$buf =~ s/^(.+?;)//s) {
-									$at_rule .= $1;
-									next;
-								}
-								#if there is no more, then flag it as comment
-								else {
-									$self->comment($at_rule);
-									last FINAL;
-								}
-							}
-							#if not in quotes..., then send them an at_rule
-							else {
-								#call to _prsrl, it'll take care of everything
-							}
-						}
-					}
-					#if it isn't an at_rule then I guess it's either bad css or a closing html comment
-					else {
-						$self->comment($$buf) if length $$buf;
-						last FINAL;
-					}
-				}
-			}
+
+
+
+	# initialize the handlers here
+	# the handler values are coderefs
+	# the said subs must be able to act as methods,
+	# that is they are called with the parser object as
+	# their first argument. Some get a second argument (the token) others none because it's obvious
+	for my $h (@subs) {
+		no strict 'refs';
+		if (defined $options{'handlers'}{$h}) {
+			*{"$class::$h"} = \&{$options{'handlers'}{$h}};
 		}
-		$$buf = '';
-		return $self;
+		elsif (defined $options{'handlers'}{'default'}) {
+			*{"$class::$h"} = \&{$options{'handlers'}{'default'}};
+			$options{'handlers'}{$h} = 1;
+		}
+		else {
+			$options{'handlers'}{$h} = undef;
+		}
 	}
 
-	$$buf .= $_[0];
 
-	TOKEN: {
-		while (1) {
-			#html comments
-			if ($$buf =~ s/^\s*((?:<!--)|(?:-->))\$*//s) {
-				$self->comment($1);
-			}
-			#the comments
-			elsif ($$buf =~ m/^\s*\/\*/s) {
-				#if we can eat up the whole comment, do so
-				if ($$buf =~ s/\s*\/\*(.*?)(?<!\\)\*\///s) {
-					$self->comment($1);
+	my $self = \%options;
+	return bless $self,$class;
+}
+
+
+
+
+# parse simply accepts the css text to be parsed as a ref
+# and calls various callbacks
+# Other parsing style may be added in the future
+# but they will be backwards compatible
+# Returns undef on error and 1 on success.
+sub parse {
+	my $self = shift;
+	my $css = ${shift()};
+
+
+	# enter the parse loop
+	LOOP: {
+
+
+
+		if ($self->shift_comment(\$css)) {
+			# do nothing, it's just an alternative
+		}
+
+		elsif ($css =~ m/^\s*(?<!@)(?:[.:*[#a-zA-Z\200-\377]|\\[a-fA-F]{1,6}\s?|\\[ -~\200-\377])/s) {
+			# we've got a selector string, parse the whole ruleset
+
+			$css =~ s/^\s*((?:[^{]|\\{)+)//s;
+			my $selector_string = $1;
+
+			# we need to 'backtrack' for comments here.
+			if ($selector_string =~ m{(?<!\\)\*/\s*$}s) {
+				# we've got a comment at the end of the selector string
+				$selector_string =~ s{(?<!\\)/\*(.*?)$}{}s;
+				if ($self->{'handlers'}{'css_comment'}) {
+					$self->css_comment("/* $1");
 				}
-				#else we need more
+				elsif ($self->{'handlers'}{'comment'}) {
+					$self->comment("/* $1");
+				}
+			}
+
+			if ($self->{'handlers'}{'selector_string'}) {
+				$self->selector_string($selector_string);
+			}
+
+
+
+			# here we parse the block of the ruleset
+			# we take property and value one at a time
+			my $ruleset = $selector_string;
+			my $decl_toggle = '';
+			my $property;
+			BLOCK: {
+				redo BLOCK if $self->shift_comment(\$css);
+
+				# block start '{'
+				if ($css =~ s/^\s*(?<!\\){//s) {
+					# block-start
+					if ($self->{'handlers'}{'block_start'}) {
+						$self->block_start;
+					}
+					$ruleset .= ' {';
+				}
+
+
+				# extract the declaration ($decl_toggle tells us where we are)
+				elsif ($css =~ m/^\s*(?:[a-zA-Z\200-\377]|\\[a-fA-F]{1,6}\s?|\\[ -~\200-\377])/s) {
+
+					# this is for the property
+					if (!$decl_toggle) {
+
+						$css =~ s/^\s*((?:[a-zA-Z\200-\377]|\\[a-fA-F]{1,6}\s?|\\[ -~\200-\377])(?:[a-zA-Z0-9\200-\377-]|\\[a-fA-F]{1,6}\s?|\\[ -~\200-\377])*)\s*//s;
+						$property = $1;
+
+						if ($self->{'handlers'}{'property'}) {
+							$self->property($property);
+						}
+
+						COMMENT: {
+							redo COMMENT if $self->shift_comment(\$css);
+						}
+
+						$css =~ s/^\s*://s;
+						$ruleset .= "\n$property :";
+						$decl_toggle = 'value';
+					}
+
+					# this is for the value
+					else {
+
+						$css =~ s/^\s*((?:[^;}]|\\;|\\})+)//s;
+						my $value = $1;
+
+						# we need to 'backtrack' for comments here.
+						if ($value =~ m{(?<!\\)\*/\s*$}s) {
+							# we've got a comment at the end
+							$value =~ s{(?<!\\)/\*(.*?)$}{}s;
+							if ($self->{'handlers'}{'css_comment'}) {
+								$self->css_comment("/* $1");
+							}
+							elsif ($self->{'handlers'}{'comment'}) {
+								$self->comment("/* $1");
+							}
+						}
+
+
+						if ($self->{'handlers'}{'value'}) {
+							$self->value($value);
+						}
+						if ($self->{'handlers'}{'declaration'}) {
+							$self->declaration("$property : $value ;");
+						}
+
+						COMMENT: {
+							redo COMMENT if $self->shift_comment(\$css);
+						}
+
+						$css =~ s/^\s*(?<!\\);//s;
+						$ruleset .= " $value ;";
+						$decl_toggle = '';
+					}
+				}
+
+				# if there is no declaration left, we are at the end of the block
+				# and may exit it
+				elsif ($css =~ s/^\s*(?<!\\)}//s) {
+					if ($self->{'handlers'}{'block_end'}) {
+						$self->block_end;
+					}
+					$ruleset .= "\n}";
+					last BLOCK;
+				}
+
+				# parse error
 				else {
-					$$buf = $1;
-					last TOKEN;
+					if ($self->{'handlers'}{'error'}) {
+						$self->error(\$css,'Unrecognized token within block');
+					}
+					return undef;
+				}
+
+				redo BLOCK;
+			}
+			# this is the end of the BLOCK loop, we have parsed the block now
+
+
+			if ($self->{'handlers'}{'ruleset'}) {
+				$self->ruleset($ruleset);
+			}
+
+		}
+
+
+		elsif ($css =~ m/^\s*@(?:[a-zA-Z\200-\377]|\\[a-fA-F]{1,6}\s?|\\[ -~\200-\377])/s) {
+			# at-rule
+
+			$css =~ s/^\s*(@(?:[^;{]|\\;|\\{)+)//s;
+			my $at_rule = $1;
+
+			# we've got something that may contain comments, delete them
+			if ($at_rule =~ m{(?<!\\)/\*}s) {
+				my $tmp_at_rule;
+				COMMENT: {
+					last COMMENT if $at_rule =~ m/^\s*$/s;
+					$at_rule =~ s{^(.*?)((?<!\\)/\*|<!--|-->)}{$2}es;
+					$tmp_at_rule .= " $1";
+					redo COMMENT if $self->shift_comment(\$at_rule);
+				}
+				$at_rule = $tmp_at_rule;
+			}
+
+			# at_rule, no block
+			if ($css =~ s/^;//) {
+				# it was an at_rule without a block
+				if ($self->{'handlers'}{'at_rule'}) {
+					$self->at_rule("$at_rule ;");
 				}
 			}
 
+			# at_rule, a block
+			elsif ($css =~ s/^{//) {
 
+				if ($self->{'handlers'}{'at_symbol'}) {
+					# at_symbol is different from at_rule
+					# in that one expects a block to follow the former
+					$self->at_symbol($at_rule);
+				}
 
-			#deal with anything outside blocks and comments
+				# we've got a block start
+				if ($self->{'handlers'}{'block_start'}) {
+					$self->block_start;
+				}
 
-			elsif ($$buf =~ s/^([^\{]+?)(?<!\\)(\{|\/\*)/$2/se) {
-				my $txt = $1;
+				# grab the next meaningful token to guess whether we have
+				# a ruleset of just declarations
+				# this is complicated by the need to eliminate comments
+				my $nxt_toke;
+				$css =~ m{^.*?(?<!\\)(;|{|}|/\*)}s;
+				$nxt_toke = $1;
 
-				while(1) {
-				#if we stopped because of a comment, then trigger it so that we may get
-				#it out of the way
-					if ($2 eq "/*") {
-						if ($$buf =~ s/^\/\*(.*?)\*\///s) {
-							$self->comment($1);
-							$$buf = $txt.$$buf;
-							goto TOKEN;
-						}
-						#if we can't right now, wait for more data
-						else {
-							$$buf = $txt.$$buf;
-							last TOKEN;
-						}
+				# a comment occured before the first meaningful token
+				# we must delete it before we look any further
+				if ($nxt_toke eq '/*') {
+					my $saved_css;
+					COMMENT: {
+						$css =~ s{^(.*?)(?<!\\)/\*}{/\*}s;
+						$saved_css .= $1;
+						$self->shift_comment(\$css);
+
+						$css =~ m/^.*?(?<!\\)(;|{|}|\/\*)/s;
+						$nxt_toke = $1;
+						redo COMMENT if $nxt_toke eq '/*';
 					}
-					else {
-						#check to see that it isn't in quotes,...
-						if ($self->_quote($txt) || $self->_square($txt) || $self->_paren($txt)) {
-							if ($$buf =~ s/^(\{[^\{]+?)(?<!\\)(\{|\/\*)/$2/se) {
-								$txt .= $1;
-								next;
-							}
-							else {
-								$$buf = $txt.$$buf;
-								last TOKEN;
-							}
+					$css = $saved_css . $css;
+				}
+
+
+				# we're already at the end of the block
+				# this doesn't mean that the block is empty, there could be
+				# a solitary declaration with no ';' at the end
+				if ($nxt_toke  eq '}') {
+
+					# check for a solitary declaration (we know there is no comment)
+					$css =~ s/^\s*(.*?)?(?<!\\)}//s;
+					my $declaration = $1;
+
+					# there is indeed something (and there can be only one)
+					if ($declaration) {
+						my ($property,$value) = split /:/, $declaration, 2;
+
+						if ($self->{'handlers'}{'property'}) {
+							$self->property($property);
 						}
-						else {
-							goto RULE;
+
+						if ($self->{'handlers'}{'value'}) {
+							$self->value($value);
 						}
+
+						if ($self->{'handlers'}{'declaration'}) {
+							$self->declaration("$property : $value ;");
+						}
+
+					}
+
+
+					if ($self->{'handlers'}{'block_end'}) {
+						$self->block_end;
 					}
 				}
 
-				#now we're sure there isn't a comment around
-				#it can either start with a single line at_rule (and contain several)
-				#or not contain any as there can't be a sl at_rule between a "normal"
-				#rule and the beggining of a block.
-				RULE: {
-					#Single line @rules (no block after it)
-					if ($txt =~ s/^\s*(\@.+?;)//s) {
-						my $at_rule;
-						$at_rule = $1;
-						while (1) {
-							#the last ";" must not be within quotes...
-							#if it is quoted then when need more from the current buffer
-							if ($self->_quote($at_rule) || $self->_square($at_rule) || $self->_paren($at_rule)) {
-								if ($$buf =~ s/^(.+?;)//s) {
-									$at_rule .= $1;
-									next;
+				# if it is a ruleset, we pass the control back to the main loop
+				# the latter will parse the ruleset(s) and catch the block_end
+				# which indicates that the at_rule is over
+				# this even allows for nested at_rules
+				elsif ($nxt_toke  eq '{') {
+					# nothing happens here
+				}
+
+				# if it is just declarations, we parse them (this is code duplication,
+				# but never mind, we'll fix that later (esp. as we'll need code that
+				# can parse declarations on their own within a style="" attr))
+				elsif ($nxt_toke  eq ';') {
+
+					my $decl_toggle = '';
+					my $property = '';
+					DECLARATION:{
+
+						redo DECLARATION if $self->shift_comment(\$css);
+
+						# extract the declaration ($decl_toggle tells us where we are)
+						if ($css =~ m/^\s*(?:[a-zA-Z\200-\377]|\\[a-fA-F]{1,6}\s?|\\[ -~\200-\377])/s) {
+
+							# this is for the property
+							if (!$decl_toggle) {
+
+								$css =~ s/^\s*((?:[a-zA-Z\200-\377]|\\[a-fA-F]{1,6}\s?|\\[ -~\200-\377])(?:[a-zA-Z0-9\200-\377-]|\\[a-fA-F]{1,6}\s?|\\[ -~\200-\377])*)\s*//s;
+								$property = $1;
+
+								if ($self->{'handlers'}{'property'}) {
+									$self->property($property);
 								}
-								#if there is no more, then we need more data
-								else {
-									$$buf = $at_rule.$txt.$$buf;
-									last TOKEN;
+
+								COMMENT: {
+									redo COMMENT if $self->shift_comment(\$css);
 								}
+
+								$css =~ s/^\s*://s;
+								$decl_toggle = 'value';
 							}
-							#if not in quotes..., then send them an at_rule
+
+							# this is for the value
 							else {
-								#call to _prsrl, it'll take care of everything
-								goto RULE;
+
+								$css =~ s/^\s*((?:[^;}]|\\;|\\})+)//s;
+								my $value = $1;
+
+								# we need to 'backtrack' for comments here.
+								if ($value =~ m{(?<!\\)\*/\s*$}s) {
+									# we've got a comment at the end
+									$value =~ s{(?<!\\)/\*(.*?)$}{}s;
+									if ($self->{'handlers'}{'css_comment'}) {
+										$self->css_comment("/* $1");
+									}
+									elsif ($self->{'handlers'}{'comment'}) {
+										$self->comment("/* $1");
+									}
+								}
+
+
+								if ($self->{'handlers'}{'value'}) {
+									$self->value($value);
+								}
+								if ($self->{'handlers'}{'declaration'}) {
+									$self->declaration("$property : $value ;");
+								}
+
+								COMMENT: {
+									redo COMMENT if $self->shift_comment(\$css);
+								}
+
+								$css =~ s/^\s*(?<!\\);//s;
+								$decl_toggle = '';
 							}
 						}
-					}
-					#if it isn't a sl at_rule then it's either whitespace or another kind of rule
-					else {
-						if ($txt =~ s/^\s*?\{//s) {
-							last RULE;
+
+						# if there is no declaration left, we are at the end of the block
+						# and may exit it
+						elsif ($css =~ s/^\s*}//s) {
+							if ($self->{'handlers'}{'block_end'}) {
+								$self->block_end;
+							}
+							last DECLARATION ;
 						}
+
+						# parse error
 						else {
-							my $rules;
-							#get rid of leading and trailing \s, of non single spaces, tabs and \n
-							$txt =~ s/^\s*//s;
-							$txt =~ s/(.*)\s*$//s;
-							$rules = $1;
-							$rules =~ s/ +|\n|\t/ /gs;
-
-							#if we've got an at_rule
-							if ($rules =~ s/^\s*(\@\w+)//) {
-								$self->rule(["at_rule",$1]);
-								last RULE;
+							if ($self->{'handlers'}{'error'}) {
+								$self->error(\$css,'Token not recognized as declaration');
 							}
-
-							#else if it's a list
-							elsif ($rules =~ m/,/) {
-								my @all_rules = split /,/,$rules;
-								my @parsed = _prsrl(@all_rules);
-								$self->rule(@parsed);
-								last RULE;
-							}
-
-							#else if it's a hierarchy
-							elsif ($rules =~ m/^\s*\w+(\s\w+)+/) {
-								my @hierarchy = split / /,$rules;
-								my @parsed = _prsrl(@hierarchy);
-								$self->rule(["hierarchy",\@parsed]);
-								last RULE;
-							}
-
-							#else it's a lonely rule
-							else {
-								last RULE if $rules =~ m/^\s*$/;
-								my @parsed = _prsrl($rules);
-								$self->rule(@parsed);
-								last RULE;
-							}
+							return undef;
 						}
+
+						redo DECLARATION;
 					}
 				}
-			}
 
-			#deal with blocks here
-			elsif ($$buf =~ m/^\{/) {
-				my $block;
-				BLOCK: {
-					while (1) {
-						#if ($$buf =~ s/^(\{.*?)(?<!\\)(\}|\/\*)//s) {
-						if ($$buf =~ s/^(.*?)(?<!\\)(\}|\/\*)//s) {
-							$block .= $1;
-							#if we stopped because of a comment, then trigger it so that we may get
-							#it out of the way
-							if ($2 eq "/*") {
-								if ($$buf =~ s/^(.*?)(?<!\\)\*\///s) {
-									$self->comment($1);
-									$$buf = $block.$$buf;
-									goto TOKEN;
-								}
-								#if we can't right now, wait for more data
-								else {
-									$$buf = $block.$$buf;
-									last TOKEN;
-								}
-							}
-							else {
-								$block .= "}";
-							}
-
-							while (1) {
-
-								#the closing "}" must not be within quotes
-								#if it is quoted then when need more from the current buffer
-								if ($self->_quote($block)) {
-									if ($$buf =~ s/^(.*?)(?<!\\)(\}|\/\*)//s) {
-										my $tmp_blk = $1;
-
-										#then it can be a comment
-										if ($2 eq "/*") {
-											#but the comments must not be quoted
-											#if it is quoted, then put it in the $block;
-											if ($self->_quote($block.$tmp_blk)) {
-												$block .= $tmp_blk."/*";
-												next;
-											}
-
-											#otherwise we eat up the comment
-											else {
-												if ($$buf =~ s/^(.*?)(?<!\\)\*\///s) {
-													$self->comment($1);
-													$$buf = $block.$tmp_blk.$$buf;
-													goto TOKEN;
-												}
-												#if we can't right now, wait for more data
-												else {
-													$$buf = $block.$tmp_blk."/*".$$buf;
-													last TOKEN;
-												}
-											}
-										}
-
-										#if not a comment, we can add it to the lot and go round
-										else {
-											$block .= $tmp_blk."}";
-											next;
-										}
-									}
-									#if there is no more, then we need more data
-									else {
-										$$buf = $block.$$buf;
-										last TOKEN;
-									}
-								}
-								else {
-									#here we need do the oblk count
-									if ($self->_blk($block)) {
-										$block =~ s/^\{(.*)\}\s*$/$1/s;
-										my %props;
-										my ($pr_n,$pr_v);
-										while (1) {
-											if ($block =~ m/^.*(?<!\\)\;/s) {
-												$self->block($self->_propprs($block));
-												$block = '';
-											}
-											else {
-												my ($pr_n,$pr_v) = split /:/,$block;
-												goto TOKEN if $pr_n =~ m/^\s*$/s;
-												$pr_n =~ s/^\s*(\S.*\S)\s*$/$1/s;
-												$pr_n =~ s/^\{\s*//;
-												$pr_v =~ s/^\s*(\S.*\S)\s*$/$1/s;
-												$props{$pr_n} = $pr_v;
-												$self->block(\%props);
-												goto TOKEN;
-											}
-										}
-									goto TOKEN;
-									}
-									else {
-										goto BLOCK;
-									}
-								}
-							}
-						}
-						else {
-							#we don't have enough data
-							last TOKEN;
-						}
+				# error
+				else {
+					# call the error callback if it exists
+					# and return undef
+					if ($self->{'handlers'}{'error'}) {
+						$self->error(\$css,'At-rule content not recognized');
 					}
+					return undef;
 				}
 			}
 
+			# error, this souldn't happen
 			else {
-				#die "buf still contains $$buf";# if length $$buf;
-				last TOKEN;
-			}
-		}
-	}
-}
-
-
-sub _quote {
-	#this sub checks the balance of quotes
-	my $self = shift;
-	my $str = shift;
-	my $dbl = 0;
-	my $sgl = 0;
-	while ($str) {
-		$str =~ s/^(?:\\\\|\\(?:\'|\")|[^\'\"])//s;
-		last if !length $str;
-		if ($str =~ s/^(?<!\\)\'//s && !$dbl) {
-			$sgl = $sgl ? 0:1;
-		}
-		elsif ($str =~ s/^(?<!\\)\"//s && !$sgl) {
-			$dbl = $dbl ? 0:1;
-		}
-	}
-	if ($sgl || $dbl) {
-		return 1;
-	}
-	else {
-		return 0;
-	}
-}
-
-sub _blk {
-	#this sub checks the balance of braces
-	my $self = shift;
-	my $str = shift;
-	my ($dbl,$sgl,$oblk);
-	while ($str) {
-		$str =~ s/^(?:\\\\|\\(?:\'|\"|\{|\})|[^\'\"\{\}]+?)//s;
-		last if !length $str;
-		if ($str =~ s/^\'//s && !$dbl) {
-			$sgl = $sgl ? 0:1;
-		}
-		elsif ($str =~ s/^\"//s && !$sgl) {
-			$dbl = $dbl ? 0:1;
-		}
-		elsif ($str =~ s/^\{//s && !$sgl && !$dbl) {
-			$oblk++;
-		}
-		elsif ($str =~ s/^\}//s && !$sgl && !$dbl) {
-			$oblk--;
-		}
-	}
-	if ($oblk) {
-		return 0;
-	}
-	else {
-		return 1;
-	}
-}
-
-sub _square {
-	#this sub checks the balance of square braces
-	my $self = shift;
-	my $str = shift;
-	my ($dbl,$sgl,$osq);
-	while ($str) {
-		$str =~ s/^(?:\\\\|\\(?:\'|\"|\[|\])|[^\'\"\[\]]+?)//s;
-		last if !length $str;
-		if ($str =~ s/^\'//s && !$dbl) {
-			$sgl = $sgl ? 0:1;
-		}
-		elsif ($str =~ s/^\"//s && !$sgl) {
-			$dbl = $dbl ? 0:1;
-		}
-		elsif ($str =~ s/^\[//s && !$sgl && !$dbl) {
-			$osq++;
-		}
-		elsif ($str =~ s/^\]//s && !$sgl && !$dbl) {
-			$osq--;
-		}
-	}
-	if ($osq) {
-		return 1;
-	}
-	else {
-		return 0;
-	}
-}
-
-sub _paren {
-	#this sub checks the balance of square braces
-	my $self = shift;
-	my $str = shift;
-	my ($dbl,$sgl,$opar);
-	while ($str) {
-		$str =~ s/^(?:\\\\|\\(?:\'|\"|\(|\))|[^\'\"\(\)]+?)//s;
-		last if !length $str;
-		if ($str =~ s/^\'//s && !$dbl) {
-			$sgl = $sgl ? 0:1;
-		}
-		elsif ($str =~ s/^\"//s && !$sgl) {
-			$dbl = $dbl ? 0:1;
-		}
-		elsif ($str =~ s/^\(//s && !$sgl && !$dbl) {
-			$opar++;
-		}
-		elsif ($str =~ s/^\)//s && !$sgl && !$dbl) {
-			$opar--;
-		}
-	}
-	if ($opar) {
-		return 1;
-	}
-	else {
-		return 0;
-	}
-}
-
-sub _propprs {
-	my $self = shift;
-	my $str = shift;
-	my ($dbl,$sgl,$oblk);
-	my $prop;
-	my %props;
-	while ($str) {
-		$str =~ s/^(\\\\|\\(?:\'|\"|\{|\}|\;)|[^\'\"\{\}\;]+?)//s;
-		last if !length $str;
-		$prop .= $1;
-		if ($str =~ s/^\'//s) {
-			$sgl = $sgl ? 0:1 if !$dbl;
-			$prop .= "'";
-		}
-		elsif ($str =~ s/^\"//s) {
-			$dbl = $dbl ? 0:1 if !$sgl;
-			$prop .= '"';
-		}
-		elsif ($str =~ s/^\{//s) {
-			$oblk++ if (!$dbl && !$sgl);
-			$prop .= '{';
-		}
-		elsif ($str =~ s/^\}//s) {
-			$oblk-- if (!$dbl && !$sgl);
-			$prop .= '}';
-			if (!$oblk && !$dbl && !$sgl) {
-				my ($pr_n,$pr_v) = split /\{/,$prop,2;
-				$pr_n =~ s/^\s*//s;
-				$pr_n =~ s/\s*$//s;
-				$pr_v =~ s/^\s*//s;
-				$pr_v =~ s/\s*$//s;
-				$pr_v = "{".$pr_v;
-				$props{$pr_n} = $pr_v;
-				$prop = '';
-			}
-		}
-		elsif ($str =~ s/^\;//s) {
-			if (!$sgl && !$dbl && !$oblk) {
-				my ($pr_n,$pr_v) = split /:/,$prop,2;
-				if ($pr_n !~ m/^\s*$/s) {
-					$pr_n =~ s/^\s*//s;
-					$pr_n =~ s/\s*$//s;
-					$pr_v =~ s/^\s*//s;
-					$pr_v =~ s/\s*$//s;
-					$props{$pr_n} = $pr_v;
+				# call the error callback if it exists
+				# and return undef
+				if ($self->{'handlers'}{'error'}) {
+					$self->error(\$css,'Unknown token, thought it was at-rule but appears to be wrong');
 				}
-				$prop = '';
-			}
-			else {
-				$prop .= ';';
+				return undef;
 			}
 		}
+
+		# we're meeting a solitary end-of-block, we probably just parsed a ruleset
+		# nested within an at-rule
+		elsif ($css =~ s/^\s*(?<!\\)}//s) {
+			if ($self->{'handlers'}{'block_end'}) {
+				$self->block_end;
+			}
+		}
+
+		# we-ve reached eof/eos
+		# exit the parse stating that it was successful
+		elsif ($css =~ s/^\s*$//s) {
+			return 1;
+		}
+
+
+		# syntax error
+		# do something with the error if appropriate, and return undef to signal failure
 		else {
-			#$prop .= $1;
+			if ($self->{'handlers'}{'error'}) {
+				$self->error(\$css,'Unknown token');
+			}
+			return undef;
 		}
+
+		redo LOOP;
+
+		# end of the parse loop
 	}
-	return \%props;
 }
 
 
 
-sub _prsrl {
 
-	my @parsable = @_;
-	my @returned;
-	my $rule;
-	my ($el_n,$el_v);
-
-
-	foreach $rule (@parsable) {
-		my @tmp;
-
-		next if $rule =~ m/^\s*$/;
-		$rule =~ s/^\s*//s;
-		$rule =~ s/\s*$//s;
-
-		#it's a hierarchy...
-		if ($rule =~ m/^\w+(\s\w+)+/s) {
-			my @hierar = split / /,$rule;
-			my @prs_hier = _prsrl(@hierar);
-			@tmp = ("hierarchy",\@prs_hier);
-			push @returned, \@tmp;
-		}
-
-		#id
-		elsif ($rule =~ m/\#/) {
-			($el_n,$el_v) = split /\#/, $rule;
-			@tmp = ("id",$el_n,$el_v);
-			push @returned, \@tmp;
-		}
-
-		#class
-		elsif ($rule =~ /\./) {
-			($el_n,$el_v) = split /\./, $rule;
-			@tmp = ("class",$el_n,$el_v);
-			push @returned, \@tmp;
-		}
-
-		#pseudo-class
-		elsif ($rule =~ /\:/) {
-			($el_n,$el_v) = split /:/, $rule;
-			@tmp = ("pseudo-class",$el_n,$el_v);
-			push @returned, \@tmp;
-		}
-
-		#element
-		elsif ($rule =~ m/^\w+$/) {
-			@tmp = ("element",$rule,"");
-			push @returned, \@tmp;
-		}
-
-		#should not happen
-		else {
-			die "Bad rule was sent: $rule sent by " . (caller())[2] . "\n";
-		}
-	}
-	return @returned;
-}
-
-
-sub css_eof {
-    shift->css_parse(undef);
-}
-
-
-sub css_file {
-    my($self, $file) = @_;
-    no strict 'refs';
-    local(*F);
-    unless (ref($file) || $file =~ /^\*[\w:]+$/) {
-		open(F, $file) or die "Can't open $file: $!";
-		$file = \*F;
-    }
-    my $chunk = '';
-    while(read($file, $chunk, 1024)) {
-		$self->css_parse($chunk);
-    }
-    close($file);
-    $self->css_eof;
-}
-
-sub case_sensitive {
+# deletes the three kinds of comments
+# accepts a reference to the $css text
+# return true upon succes, undef otherwise
+sub shift_comment {
 	my $self = shift;
-	@_ ? $self->{'_case_sensitive'} = shift :
-		 $self->{'_case_sensitive'};
+	my $css = shift;
+	if ($$css =~ s/^\s*<!--//s) {
+		# html open comment
+
+		if ($self->{'handlers'}{'html_open_comment'}) {
+			$self->html_open_comment;
+		}
+		elsif ($self->{'handlers'}{'comment'}) {
+			$self->comment('<!--');
+		}
+		return 1;
+	}
+	elsif ($$css  =~ s/^\s*-->//s) {
+		# html close comment
+
+		if ($self->{'handlers'}{'html_close_comment'}) {
+			$self->html_close_comment;
+		}
+		elsif ($self->{'handlers'}{'comment'}) {
+			$self->comment('-->');
+		}
+		return 1;
+	}
+	elsif ($$css  =~ s{^\s*(?<!\\)/\*}{}s) {
+		# css comment
+		# return it's content
+
+		$$css=~ s{(.*?)(?<!\\)\*/}{}sm;
+		my $css_comment = $1;
+
+		if ($self->{'handlers'}{'css_comment'}) {
+			$self->css_comment("/* $css_comment */");
+		}
+		elsif ($self->{'handlers'}{'comment'}) {
+			$self->comment("/* $css_comment */");
+		}
+		return 1;
+	}
+	return undef;
 }
 
 
 
-
-sub comment {
-	#$comment
-	#NB: comment also gets the <!-- and --> that are legal
-	#within stylesheets
-	#my $self = shift;
-	#my $comment = shift;
-}
-
-sub rule {
-	#( ($type,$elem_name,$elem_value),...)
-	# or
-	#( ($type=hierarchy,$list),...)
-	#my $self = shift;
-	#my @rul_elem = @_;
-}
-
-sub block {
-	#\%properties
-	#my $self = shift;
-	#my %propt = %{$_[0]};
-}
 1;
 
 __END__
 
+
 =head1 NAME
 
-CSS::Parser - Base class for CSS stylesheets parsing
+CSS::Parser - parser for CSS-style syntax
 
 =head1 SYNOPSIS
 
-  C<package YourModule;>
-  C<use CSS::Parser;>
-  C<@ISA = qw(CSS::Parser);>
+ use CSS::Parser;
 
-  C<sub block {>
-	  C<my $self = shift;>
-	  C<my %properties = %{$_[0]};>
-  C<}>
-  C<sub comment {>
-	  C<my $self = shift;>
-	  C<my $comment = shift;>
-  C<}>
-  C<sub rule {>
-	C<my $self = shift;>
-	C<my @rule_elem = @_;>
-	C<#where:>
-	C<#( ($type,$elem_name,$elem_value),...)>
-	C<# or>
-	C<#( ($type==hierarchy,$list),...)>
-  C<}>
+ my $css = CSS::Parser->new(
+                           handlers => {
+                                        css_comment      => \&css_com,
+                                        selector_string  => \&sel,
+                                        block_start      => \&blk_s,
+                                        property         => \&prop,
+                                        value            => \&val,
+                                        block_end        => \&blk_e,
+                                        at_rule          => \&atr,
+                                        at_symbol        => \&ats,
+                                        error            => \&error
+                                        }
+                           );
 
-Then in a script:
+ $css->parse(\$some_css_text);
 
-  C<use YourModule;>
-  C<my $css = new YourModule;>
-  C<$css->css_parse(chunk1);>
-  C<$css->css_parse(chunk2);>
-  C<$css->css_eof>
+ sub css_com {
+    my $self = shift;
+    my $comment = shift;
+    print "css comment:\n\t$comment\n";
+ }
 
-  or
-
-  C<$css->css_file(path/to/file.css or \*FHANDLE)>
-
-
-B<NOTE>: the interface to rule will change in the coming version to become more useable
-
+ ...
 
 =head1 DESCRIPTION
 
-C<CSS::Parser> will eat up CSS data and parsed chunks to callbacks. These callbacks have to be subclasses in order to get anything interesting out of the parser. The simplest subclass is one that would simply print out the CSS logical bits that have been found by the parser and info it has received about them. You should find an example of this called C<CSSPrinter> in the example dir of this distribution.
+The C<CSS::Parser> deals simply with fairly loose CSS syntax.
+It doesn't know anything about what it is parsing, for that
+see other classes. This allows it to be the base for C<CSS::CSSn>,
+C<CSS::STTSn> and any other parser for a css-compatible syntax.
 
-As of now, this parser isn't 100% CCS2 compliant, but it is very close to the CSS1 specification. That is to say that it should successfully parse about 99.9% of stylesheets that you are likely to find on the web, as no browser is yet fully CSS2 compliant either.
+Chances are, you will want to use one of the existing subclasses or
+to subclass it yourself.
 
-The next release (already seriously in the works as of this writing) will come very much closer to CSS2. Also, other modules will be provided together with this one so as to already implement the most useful subclasses. I am currently working on C<CSS::Expand> that given a stylesheet and an HTML page would return a page in which all tags will have their C<style> attribute set (a mechanism for a default stylesheet will be present) and C<CSS::Valid> that will reduce a stylesheet to its valid part as specified by the CSS2 specification.
+The interface to C<CSS::Parser> is:
 
-These modules may become useful for example for robot writers who want to skip parts of pages that have a C<display: none> or a C<visibility: hide/hidden> style attribute set, so as to circumvent cheaters. An example of this will be included in the next release.
+=over 4
 
-Also, as XML parsing will be done more and more in perl, and as CSS can be included in XML, it is likely that subclasses will be written to cooperate with modules in the XML:: hierarchy or with scripts using them.
+=item my $css = CSS::Parser->new([style => $parse_style],[handlers => $hashref_of_handlers]);
 
-=head1 METHODS
+The constructor takes a variety of options provided in a hash.
 
-=head2 Public
+I<style> defines the style of parsing that you want from the parser. As
+of now the only style is 'callback' (default), however this may evolve
+in the future.
 
-B<new()>			The construstor, takes no parametres, returns the parser object.
+I<handlers> specifies a hash of callbacks to be called when a given
+token has been met. Callbacks are CODEREFS. The callback sub will
+receive the parser object as it's first argument, and optionally the
+token when it makes sense (eg: selector_string will be passed the
+selector, but block_start won't receive the '{').
 
-B<css_parse()>	The main parsing method, takes a string for argument (C<$css->css_parse($string)>)
+One may use 'default' to activate them all. Note that you can set a
+callback to the empty string (not undef) if you wish to set a default
+for all but to deactivate that specific callback.
 
-B<css_file()>		Parse a stylesheet from a file, take either a filename or a ref to a handle glob (C<$css->css_file("file.css")> or C<$css->css_file(\*CSS)>)
+=over 8
 
-B<css_eof()>		Signals end of file to end parsing, no argument.
+=item * html_open_comment
 
-B<case_sensitive()>	Get/Set the case_sensitivity of returned rules. This may be useful for in CSS case-sensitivity depends on the case-sensitivity type of the document to which it is applied. That is, in HTML it will be case-insensitive whereas in XML it will not. (C<$css->case_sensitive(1)> or C<$case_s = $css->case_sensitive()>)
+Called when a <!-- comment is seens, no second argument.
 
-B<NOTE>: this doesn't do anything yet, it will be implemented at the same time as the new rule interface.
+=item * html_close_comment
 
-B<comment()>		Callback on comments. Receives a scalar containing the text of the comment without the /* and */.
+Called when a --> comment is seens, no second argument.
 
-B<rule()>		Callback on rules (both selectors and @rules). Contains a list of references to lists contain the following data for each rule met before a block C<$type> (class, id, at_rule, sl_at_rule, element, hierarchy, pseudo-clas). If it isn't a hierarchy then two other elements follow C<$name> (the name of the rule/selector eg: A for A:link) and C<$value> (the value of the rule/selector eg: link for A:link). If it is a hierarchy then there is only one element after type that is a reference to yet another list of lists as described above.
+=item * css_comment
 
-B<VERY IMPORTANT NOTE>: This is altogether I<too complicated, inappropriate and wrong>. I have found a much better way to express the complexity and variety of what rules/selectors can be, written it and am currently debugging it and finishing the last details. It should be out between mid and end of August with the next release of this module. Do not waste time building code based on this callback, the interface to come is everything but backwards compatible.
+Called when a css comment of the form /* text */ is seen. Receives the
+comment with leading /* and trailing */.
 
-B<block()>	Callback on blocks. Receives a ref to a hash containing all the name/value pairs of the block's properties as keys/values.
+=item * comment
 
-B<NOTE>: This will remain very much as is, except that in the case of nested blocks the key will be the name before the nested block and the value a ref to a hash containing the property pairs.
+Called when any of the above types of comment is seen. Receives the
+comment as is.
+
+=item * at_symbol
+
+Called when an at-symbol (@ident) is seen and is followed by a block.
+The block is parsed subsequently. Receives the at-symbol.
+
+=item * at_rule
+
+Called when a block-less at-rule (@import url('foo') print;) is seen,
+receives the entire rule (it isn't further tokenized, that is the job
+of the subclass because it requires it to know what is expected after
+the specific at-keyword).
+
+=item * selector_string
+
+Called whenever a selector string is seen and receives the entire
+string as tokenising it further would require knowledge of the specific
+variant of CSS.
+
+=item * block_start
+
+Called when the beginning of a block is seen ({), receives nothing.
+
+=item * property
+
+Called when a property is seen, receives the property.
+
+=item * value
+
+Called when a value is seen, receives the value which is not parsed to
+know it's individual components, that belongs to the subclass.
+
+=item * declaration
+
+Called with property : $value ;
+
+=item * block_end
+
+Same as block_start, for }.
+
+=item * ruleset
+
+Called with selector_string '{' [declaration;]* '}'
+
+=item * error
+
+Called whenever the parser notices an error, receives what is left of
+the CSS text when the error occurred plus an informative message.
+
+=item * default
+
+The use for default is to substitute a standard callback for all
+callbacks that are not defined.
+
+=back
 
 
-B<NOTE>: These last three (or part of them) will probably gain a last parametre containing the original text.
+=item $css->parse( $string_ref );
 
-=head2 Supposedly private
+Tells the parser to go ahead and parse the provided reference to a
+string. Note that the string will be empty after the parser has
+finished, unless the stylesheet contains an error. It returns 1 upon
+success and undef upon failure.
 
-These are not supposed to be used outside, but you may find them useful (if not for use within this module, maybe for copying elsewhere, feel free). The return values are inverted between them, that is because it fits with their use within this module.
+=back
 
-B<_blk()>			Returns 0 if the {} are uneven (escapes with \ and quoting are taken into account) and 1 if they are even.
-
-B<_quote()>			Returns 1 if quoting is uneven (escapes with \ and quoting interquoting (eg "'" or '"') are taken into account) and 0 if even.
-
-=head1 BUGS
-
-Not too many though as it is undergoing change many are likely to appear. I have tested it succesfully on over 100 .css as of now, but they were fairly simple ones as are most on the web as of now.
-
-
-=head1 CREDITS
-
-The parsing strategy has been taken from Gisle Ass's L<HTML::Parser> modified as much as needed to do the job. The C<eof()> and C<css_file()> methods are very close to being verbatim copies of their C<HTML::Parser> equivalent.
-
-=head1 AUTHOR
-
-Robin Berjon, robin@idl-net.com
 
 =head1 SEE ALSO
 
-L<HTML::Parser>, the CSS2 specification (http://www.w3.org)
+L<XML::Parser>, L<HTML::Parser>, L<HTML::TreeBuilder>
 
 =head1 COPYRIGHT
 
-Copyright (c) 1998 Robin Berjon. All rights reserved.
+Copyright 1998-1999 Robin Berjon (robin@knowscape.com). All rights
+reserved.
 
 This library is free software; you can redistribute it and/or
 modify it under the same terms as Perl itself.
 
-=head2 DISCLAIMER
-
-This module is alpha code, the interface for some functions I<will change soon>. It is only distributed so that users may have a look at what is in progress and make suggestions or offer bug fixes while in early stages of development. This module is B<NOT> useable for production as yet, use it at your own risk.
-
 =cut
+
+

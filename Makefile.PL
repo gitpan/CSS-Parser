@@ -3,5 +3,6 @@ use ExtUtils::MakeMaker;
 # the contents of the Makefile that is written.
 WriteMakefile(
     'NAME'	=> 'CSS::Parser',
-    'VERSION_FROM' => 'Parser.pm', # finds $VERSION
+    VERSION_FROM => 'Parser.pm',
+    dist         => { COMPRESS => 'gzip -9f', SUFFIX => 'gz', },
 );
